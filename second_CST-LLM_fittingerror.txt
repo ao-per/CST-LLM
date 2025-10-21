@@ -1,0 +1,109 @@
+
+代码核心实现了**CST（Class-Shape Transformation，类形状变换）翼型参数化方法**，并基于最小二乘法拟合与加权误差计算逻辑，涉及4个关键公式，以下是公式原文、代码映射及含义说明：
+
+
+### 一、核心公式1：CST参数化模型（含尾缘厚度）
+#### 公式原文
+翼型上下表面的z坐标（高度）由“类别函数+形状函数+尾缘厚度项”三部分构成：  
+$$ z(x) = C(x) \cdot S(x) + x \cdot z_{\text{TE}} $$  
+- $C(x)$：类别函数（Class Function），决定翼型整体轮廓类型（如翼型、机身）；  
+- $S(x)$：形状函数（Shape Function），由伯恩斯坦多项式线性组合构成，决定翼型细节形状；  
+- $z_{\text{TE}}$：尾缘厚度（Trailing Edge Thickness），补偿尾缘处的厚度贡献；  
+- $x$：归一化后的翼型弦向坐标（$x \in [0,1]$，0为前缘，1为后缘）。
+
+
+#### 代码映射
+1. **类别函数 $C(x)$**  
+   代码中针对翼型固定设置 $N_1=0.5$（前缘形状参数）、$N_2=1.0$（后缘形状参数），公式为：  
+   $$ C(x) = x^{N_1} \cdot (1-x)^{N_2} $$  
+   对应代码：  
+   ```python
+   N1 = 0.5  # 前缘形状参数
+   N2 = 1.0  # 后缘形状参数
+   C_upper = (x_norm_upper)**N1 * (1 - x_norm_upper)**N2  # 上表面类别函数
+   C_lower = (x_norm_lower)**N1 * (1 - x_norm_lower)**N2  # 下表面类别函数
+   ```
+
+2. **形状函数 $S(x)$**  
+   由$N$阶伯恩斯坦多项式线性组合构成，公式为：  
+   $$ S(x) = \sum_{i=0}^N A_i \cdot B_{i,N}(x) $$  
+   其中 $B_{i,N}(x)$ 是$i$次$N$阶伯恩斯坦基函数：  
+   $$ B_{i,N}(x) = \binom{N}{i} \cdot x^i \cdot (1-x)^{N-i} $$  
+   $\binom{N}{i}$ 是组合数，$A_i$ 是待拟合的CST系数。  
+   对应代码（构建基函数+拟合系数）：  
+   ```python
+   # 构建伯恩斯坦基函数 B_{i,N}(x)
+   for i in range(N+1):
+       A_upper[:, i] = comb(N, i) * (x_norm_upper)**i * (1 - x_norm_upper)**(N-i)
+   # 最小二乘拟合CST系数 A_i（S(x)的线性系数）
+   CST_coefficients_upper = np.linalg.lstsq(A_upper * C_upper[:, np.newaxis], z_modified_upper, rcond=None)[0]
+   ```
+
+3. **尾缘厚度项 $x \cdot z_{\text{TE}}$**  
+   $z_{\text{TE}}$ 是尾缘处（$x$最大）的z坐标值，对应代码：  
+   ```python
+   # 提取尾缘厚度（x最大处的z值）
+   z_te_upper = z_upper[np.argmax(x_upper)]
+   z_te_lower = z_lower[np.argmax(x_lower)]
+   ```
+
+4. **完整模型计算**  
+   代码中先通过“原始z值 - 尾缘厚度项”分离出 $C(x) \cdot S(x)$，拟合系数后再重构完整z值：  
+   ```python
+   # 分离 C(x)S(x) = z - x·z_TE
+   z_modified_upper = z_upper - x_norm_upper * z_te_upper
+   # 重构拟合值 z_fit = C(x)S(x) + x·z_TE
+   z_fit_upper = np.dot(A_upper * C_upper[:, np.newaxis], CST_coefficients_upper) + x_norm_upper * z_te_upper
+   ```
+
+
+### 二、核心公式2：加权拟合误差计算（公式7、8）
+#### 公式原文
+代码严格按照文档中“前缘区域加权”的误差计算逻辑，包含2个关联公式：  
+1. **权重公式（公式8）**：前缘区域（$x < 0.2$）误差权重为2，其他区域为1，增强前缘拟合精度（翼型前缘对气动性能更关键）：  
+   $$ w(x) = \begin{cases} 
+   2 & \text{if } x < 0.2 \\
+   1 & \text{otherwise}
+   \end{cases} $$  
+
+2. **总拟合误差（公式7）**：加权绝对误差之和：  
+   $$ \text{total\_error} = \sum_{i=1}^n w(x_i) \cdot |z_{\text{orig}}(x_i) - z_{\text{fit}}(x_i)| $$  
+   - $z_{\text{orig}}$：原始翼型z坐标；  
+   - $z_{\text{fit}}$：CST拟合的z坐标；  
+   - $n$：坐标点数量。
+
+
+#### 代码映射
+```python
+def calculate_fitting_error(x_orig, z_orig, z_fit):
+    # 公式8：计算权重
+    weights = np.where(x_orig < 0.2 * max_x, 2.0, 1.0)  # max_x是原始x最大值，确保判断基准正确
+    # 公式7：计算加权绝对误差之和
+    absolute_errors = np.abs(z_orig - z_fit)
+    weighted_errors = weights * absolute_errors
+    total_error = np.sum(weighted_errors)
+    return total_error, weighted_errors
+```
+
+
+### 三、核心公式3：最小二乘拟合（求解CST系数）
+#### 公式原文
+通过最小二乘法最小化“$C(x)S(x)$ 与分离后的原始值”的残差，求解CST系数 $A_i$，数学表达为：  
+$$ \arg\min_{A_i} \sum_{i=1}^n \left[ C(x_i) \cdot \sum_{j=0}^N A_j \cdot B_{j,N}(x_i) - z_{\text{modified}}(x_i) \right]^2 $$  
+其中 $z_{\text{modified}} = z_{\text{orig}} - x \cdot z_{\text{TE}}$。
+
+
+#### 代码映射
+代码使用NumPy的`lstsq`（最小二乘求解）实现，将基函数与类别函数的乘积作为设计矩阵：  
+```python
+# A_upper * C_upper：设计矩阵（每行对应1个x点，每列对应1个伯恩斯坦项×类别函数）
+# z_modified_upper：目标值（分离后的 C(x)S(x)）
+CST_coefficients_upper = np.linalg.lstsq(A_upper * C_upper[:, np.newaxis], z_modified_upper, rcond=None)[0]
+```
+
+
+### 总结
+代码本质是**“CST参数化模型 + 最小二乘拟合 + 加权误差评估”** 的完整实现，所有关键计算均对应明确的数学公式，其中：  
+- 公式1（CST模型）是翼型参数化的核心，决定拟合的“形状表达能力”；  
+- 公式2（加权误差）是拟合效果的评估标准，侧重前缘区域精度；  
+- 公式3（最小二乘）是求解CST系数的优化方法，确保拟合残差最小。
