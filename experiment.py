@@ -1,237 +1,128 @@
 import numpy as np
-import matplotlib.pyplot as plt
-import os
-import random
 from scipy.special import comb
-from scipy.optimize import least_squares
+import os
 
-# -------------------------- 1. 基础配置与数据加载 --------------------------
-# 实验参数（严格匹配文档）
-MAX_GENERATIONS = 20  # 最大进化代数
-POP_SIZE = 15         # 种群规模
-NUM_EXPERIMENTS = 5   # 独立实验次数
-BERNSTEIN_ORDERS = [6, 8, 10]  # 文档指定的多项式阶数
-TRAIN_COUNT = 1000    # 训练集翼型数量
-TEST_COUNT = 500      # 测试集翼型数量
+def calculate_fitting_error(x_upper, z_upper, x_lower, z_lower, 
+                           z_fit_upper, z_fit_lower, max_x):
+    """计算翼型拟合误差"""
+    weights_upper = np.where(x_upper < 0.2 * max_x, 2.0, 1.0)
+    error_upper = np.sum(weights_upper * np.abs(z_upper - z_fit_upper))
+    
+    weights_lower = np.where(x_lower < 0.2 * max_x, 2.0, 1.0)
+    error_lower = np.sum(weights_lower * np.abs(z_lower - z_fit_lower))
+    
+    return error_upper, error_lower, error_upper + error_lower
 
-# 加载UIUC翼型数据（替换为你的数据路径）
-def load_airfoils(folder, max_count):
-    airfoils = []
-    for f in os.listdir(folder):
-        if f.endswith('.dat') and len(airfoils) < max_count:
+def CST_fitting_error(file_path, N):
+    """仅计算并打印拟合误差"""
+    # 加载数据
+    with open(file_path, 'r') as f:
+        lines = [line.strip() for line in f if line.strip()]
+    
+    # 解析数据
+    upper, lower = [], []
+    section = None
+    for line in lines:
+        if line.startswith('UpX,UpY'):
+            section = 'upper'
+            continue
+        elif line.startswith('LowX,LowY'):
+            section = 'lower'
+            continue
+        
+        if section == 'upper':
+            x, y = map(float, line.split(','))
+            upper.append([x, y])
+        elif section == 'lower':
+            x, y = map(float, line.split(','))
+            lower.append([x, y])
+    
+    upper = np.array(upper)
+    lower = np.array(lower)
+    
+    # 准备数据（上表面降序，下表面升序）
+    x_upper = upper[:, 0][::-1]
+    z_upper = upper[:, 1][::-1]
+    x_lower = lower[:, 0]
+    z_lower = lower[:, 1]
+    
+    # 归一化
+    max_x = np.max(x_upper)
+    x_norm_upper = x_upper / max_x
+    x_norm_lower = x_lower / max_x
+    
+    # 尾缘厚度
+    z_te_upper = z_upper[0]
+    z_te_lower = z_lower[-1]
+    
+    # 修正z坐标
+    z_modified_upper = z_upper - x_norm_upper * z_te_upper
+    z_modified_lower = z_lower - x_norm_lower * z_te_lower
+    
+    # CST参数化
+    N1, N2 = 0.5, 1.0
+    C_upper = (x_norm_upper)**N1 * (1 - x_norm_upper)**N2
+    C_lower = (x_norm_lower)**N1 * (1 - x_norm_lower)**N2
+    
+    # 伯恩斯坦多项式
+    A_upper = np.array([[comb(N, i) * (x**i) * ((1-x)**(N-i)) 
+                       for i in range(N+1)] for x in x_norm_upper])
+    A_lower = np.array([[comb(N, i) * (x**i) * ((1-x)**(N-i)) 
+                       for i in range(N+1)] for x in x_norm_lower])
+    
+    # 最小二乘拟合
+    coeff_upper = np.linalg.lstsq(A_upper * C_upper[:, None], z_modified_upper, rcond=None)[0]
+    coeff_lower = np.linalg.lstsq(A_lower * C_lower[:, None], z_modified_lower, rcond=None)[0]
+    
+    # 计算拟合值
+    z_fit_upper = (A_upper * C_upper[:, None]) @ coeff_upper + x_norm_upper * z_te_upper
+    z_fit_lower = (A_lower * C_lower[:, None]) @ coeff_lower + x_norm_lower * z_te_lower
+    
+    return calculate_fitting_error(x_upper, z_upper, x_lower, z_lower,
+                                z_fit_upper, z_fit_lower, max_x)
+
+def process_folder(folder_path, output_file="D:\\CST-LLM\\results.csv"):
+    """批量处理文件夹内的所有CSV文件"""
+    orders = [6, 8, 10]
+    total_results = []  # 存储所有文件的结果
+    
+    # 获取文件夹内所有CSV文件
+    csv_files = [f for f in os.listdir(folder_path) if f.endswith('.csv')]
+    
+    with open(output_file, 'w', encoding='utf-8') as f_out:  # 关键修改
+        # 写入表头
+        f_out.write("文件名\t阶数6上表面\t阶数6下表面\t阶数6总误差\t"
+                   "阶数8上表面\t阶数8下表面\t阶数8总误差\t"
+                   "阶数10上表面\t阶数10下表面\t阶数10总误差\t"
+                   "三阶总和\n")
+        
+        for csv_file in csv_files:
+            file_path = os.path.join(folder_path, csv_file)
+            file_results = [csv_file]  # 存储当前文件的结果
+            
             try:
-                data = np.loadtxt(os.path.join(folder, f), skiprows=1)
-                data = data[np.argsort(data[:,0])]  # 按x排序
-                x, z = data[:,0], data[:,1]
-                airfoils.append({'x': np.clip(x, 0, 1), 'z': z})
-            except:
-                continue
-    return airfoils
+                sum_errors = 0  # 用于累加6,8,10阶的总误差
+                order_errors = []  # 存储各阶误差
+                
+                for order in orders:
+                    err_up, err_low, total_err = CST_fitting_error(file_path, order)
+                    order_errors.extend([err_up, err_low, total_err])
+                    sum_errors += total_err
+                
+                # 将结果写入列表
+                file_results.extend([f"{x:.6f}" for x in order_errors])
+                file_results.append(f"{sum_errors:.6f}")
+                
+                # 写入文件（制表符分隔）
+                f_out.write("\t".join(file_results) + "\n")
+                
+                print(f"处理完成: {csv_file}")
+                
+            except Exception as e:
+                print(f"处理失败 {csv_file}: {str(e)}")
+                # 写入错误标记
+                f_out.write(f"{csv_file}\tERROR\t{str(e)[:50]}\n")
 
-train_airfoils = load_airfoils('uiuc_airfoils/train', TRAIN_COUNT)
-test_airfoils = load_airfoils('uiuc_airfoils/test', TEST_COUNT)
-
-# -------------------------- 2. 特征变换函数与约束验证 --------------------------
-def is_valid_function(t_func):
-    """验证函数是否满足实验B/C的约束（连续、可微、单调递增等）"""
-    x = np.linspace(0, 1, 1000)
-    try:
-        t = t_func(x)
-        # 约束1：t(0)=0, t(1)=1
-        if not (np.isclose(t[0], 0) and np.isclose(t[-1], 1)):
-            return False
-        # 约束2：值域在[0,1]
-        if np.any(t < 0) or np.any(t > 1):
-            return False
-        # 约束3：单调递增（导数>0）
-        dt = np.gradient(t, x)
-        if np.any(dt <= 0):
-            return False
-        # 约束4：无NaN/Inf
-        if np.any(np.isnan(t)) or np.any(np.isinf(t)):
-            return False
-        return True
-    except:
-        return False
-
-def generate_function(prompt_type):
-    """生成符合实验A/B提示词的函数（模拟LLM输出）"""
-    # 基础函数库（覆盖文档中实验的典型函数形式）
-    base_funcs = [
-        lambda x: x**0.5,
-        lambda x: x**0.25,
-        lambda x: x**0.75,
-        lambda x: x**1.2,
-        lambda x: np.log1p(x)/np.log(2),
-        lambda x: (x**0.5 + x)/2,
-        lambda x: x**0.5 * (1 + 0.3*(x-1)),
-        lambda x: x**0.3 * (1 + 0.2*(x-1)),
-        lambda x: 0.6*x + 0.4*x**(1/3),
-        lambda x: np.sin(np.pi*x/2),
-    ]
-    # 实验A：无约束（可能生成无效函数）
-    if prompt_type == 'A':
-        if random.random() < 0.3:  # 30%概率生成无效函数
-            return random.choice([
-                lambda x: -x,  # 非正
-                lambda x: np.random.rand(*x.shape),  # 非单调
-                lambda x: x**-0.5  # 定义域错误
-            ])
-        return random.choice(base_funcs)
-    # 实验B：有约束（仅返回有效函数）
-    elif prompt_type == 'B':
-        func = random.choice(base_funcs)
-        return func if is_valid_function(func) else generate_function('B')
-    else:
-        raise ValueError("prompt_type must be 'A' or 'B'")
-
-# -------------------------- 3. 进化算法核心 --------------------------
-def calculate_objective(airfoils, t_func):
-    """计算目标函数值（所有翼型+所有阶数的加权误差和）"""
-    total_error = 0
-    for af in airfoils:
-        x, z_true = af['x'], af['z']
-        for order in BERNSTEIN_ORDERS:
-            # 1. 特征变换
-            t_x = t_func(x) if t_func else x
-            # 2. 构建CST模型
-            C_t = (t_x**0.5) * ((1 - t_x)**1.0)  # N1=0.5, N2=1
-            X = np.column_stack([C_t * comb(order, i) * t_x**i * (1-t_x)**(order-i) 
-                                for i in range(order+1)])
-            X = np.hstack([X, x.reshape(-1,1)])  # 尾缘项
-            # 3. 最小二乘拟合
-            def residual(params):
-                z_pred = X @ params
-                w = np.where(x < 0.2, 2, 1)  # 加权
-                return w * (z_pred - z_true)
-            params = least_squares(residual, np.zeros(order+2)).x
-            # 4. 计算误差
-            z_pred = X @ params
-            total_error += np.sum(np.where(x<0.2, 2, 1) * np.abs(z_pred - z_true))
-    return total_error
-
-def run_evolution(prompt_type, initial_pop=None):
-    """运行一次进化实验"""
-    # 初始化种群
-    if initial_pop is None:
-        pop = [generate_function(prompt_type) for _ in range(POP_SIZE)]
-    else:
-        pop = initial_pop.copy()  # 实验C用B的最优种群初始化
-    
-    history = []
-    for gen in range(MAX_GENERATIONS):
-        # 计算当前种群目标值
-        objectives = [calculate_objective(train_airfoils, func) for func in pop]
-        history.append(min(objectives))  # 记录每代最优
-        
-        # 进化操作（4种策略各生成15个，共60个新函数）
-        new_pop = []
-        # EP1: 与参考函数差异大
-        for _ in range(POP_SIZE):
-            ref = random.sample(pop, 2)
-            new_func = generate_function(prompt_type)
-            new_pop.append(new_func)
-        # EP2: 受参考函数启发
-        for _ in range(POP_SIZE):
-            ref = random.sample(pop, 2)
-            new_func = generate_function(prompt_type)
-            new_pop.append(new_func)
-        # EP3: 改进参考函数
-        for _ in range(POP_SIZE):
-            ref = random.choice(pop)
-            new_func = generate_function(prompt_type)
-            new_pop.append(new_func)
-        # EP4: 调整参考函数参数
-        for _ in range(POP_SIZE):
-            ref = random.choice(pop)
-            new_func = generate_function(prompt_type)
-            new_pop.append(new_func)
-        
-        # 选择：合并种群，保留最优15个
-        combined = pop + new_pop
-        combined_objs = [calculate_objective(train_airfoils, f) for f in combined]
-        pop = [combined[i] for i in np.argsort(combined_objs)[:POP_SIZE]]
-    
-    return history
-
-# -------------------------- 4. 运行实验A/B/C --------------------------
-np.random.seed(42)  # 固定种子确保可复现
-
-# 实验A：无约束初始化
-exp_a_histories = [run_evolution('A') for _ in range(NUM_EXPERIMENTS)]
-
-# 实验B：有约束初始化
-exp_b_histories = [run_evolution('B') for _ in range(NUM_EXPERIMENTS)]
-
-# 实验C：用B的最优种群初始化（取B最后一代的最优15个函数）
-# 先获取实验B最后一代的种群
-def get_best_pop_from_b():
-    best_pops = []
-    for _ in range(NUM_EXPERIMENTS):
-        pop = [generate_function('B') for _ in range(POP_SIZE)]
-        for gen in range(MAX_GENERATIONS):
-            objs = [calculate_objective(train_airfoils, f) for f in pop]
-            new_pop = [generate_function('B') for _ in range(4*POP_SIZE)]
-            combined = pop + new_pop
-            combined_objs = [calculate_objective(train_airfoils, f) for f in combined]
-            pop = [combined[i] for i in np.argsort(combined_objs)[:POP_SIZE]]
-        best_pops.append(pop)
-    return best_pops
-
-b_best_pops = get_best_pop_from_b()
-exp_c_histories = [run_evolution('B', initial_pop=pop) for pop in b_best_pops]
-
-# 基准值：原始CST（无特征变换）
-baseline_obj = calculate_objective(train_airfoils, t_func=None)
-
-# -------------------------- 5. 绘制FIG 4/5/6 --------------------------
-def plot_convergence(histories, title, save_name, baseline):
-    plt.figure(figsize=(10, 6))
-    for i, hist in enumerate(histories):
-        plt.plot(range(1, MAX_GENERATIONS+1), hist, label=f'Run {i+1}')
-    plt.axhline(baseline, color='k', linestyle='--', label='CST Baseline')
-    plt.xlabel('Generation')
-    plt.ylabel('Objective Value')
-    plt.title(title)
-    plt.legend()
-    plt.grid(alpha=0.3)
-    plt.savefig(save_name, dpi=300, bbox_inches='tight')
-    plt.show()
-
-# FIG 4: 实验A收敛曲线
-plot_convergence(
-    exp_a_histories,
-    'Experiment A: Convergence (Unconstrained Initialization)',
-    'fig4_experiment_a.png',
-    baseline_obj
-)
-
-# FIG 5: 实验B收敛曲线
-plot_convergence(
-    exp_b_histories,
-    'Experiment B: Convergence (Constrained Initialization)',
-    'fig5_experiment_b.png',
-    baseline_obj
-)
-
-# FIG 6: 实验C收敛曲线
-plot_convergence(
-    exp_c_histories,
-    'Experiment C: Convergence (Initialized with B\'s Best)',
-    'fig6_experiment_c.png',
-    baseline_obj
-)
-
-# 额外：三者对比图（文档可能包含）
-plt.figure(figsize=(10, 6))
-plt.plot(range(1, 21), np.mean(exp_a_histories, axis=0), label='Exp A (Mean)', color='blue')
-plt.plot(range(1, 21), np.mean(exp_b_histories, axis=0), label='Exp B (Mean)', color='green')
-plt.plot(range(1, 21), np.mean(exp_c_histories, axis=0), label='Exp C (Mean)', color='red')
-plt.axhline(baseline_obj, color='k', linestyle='--', label='CST Baseline')
-plt.xlabel('Generation')
-plt.ylabel('Average Objective Value')
-plt.title('Comparison of Experiment A/B/C')
-plt.legend()
-plt.grid(alpha=0.3)
-plt.savefig('exp_abc_comparison.png', dpi=300)
-plt.show()
+if __name__ == "__main__":
+    folder_path = r"D:\CST-LLM\processsed_airfoil_data\test"
+    process_folder(folder_path)

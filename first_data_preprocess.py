@@ -1,3 +1,7 @@
+
+
+
+# 实现1500个数据文件划分
 import os
 import shutil
 import random
@@ -78,10 +82,6 @@ if __name__ == "__main__":
 
 
 
-
-
-
-# D:\\airfoil_data\\processed_airfoils
 
 
 
