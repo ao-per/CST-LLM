@@ -81,7 +81,7 @@ def CST_fitting_error(file_path, N):
     return calculate_fitting_error(x_upper, z_upper, x_lower, z_lower,
                                 z_fit_upper, z_fit_lower, max_x)
 
-def process_folder(folder_path, output_file="D:\\CST-LLM\\results.csv"):
+def process_folder(folder_path, output_file):
     """批量处理文件夹内的所有CSV文件"""
     orders = [6, 8, 10]
     total_results = []  # 存储所有文件的结果
@@ -89,40 +89,41 @@ def process_folder(folder_path, output_file="D:\\CST-LLM\\results.csv"):
     # 获取文件夹内所有CSV文件
     csv_files = [f for f in os.listdir(folder_path) if f.endswith('.csv')]
     
-    with open(output_file, 'w', encoding='utf-8') as f_out:  # 关键修改
-        # 写入表头
-        f_out.write("文件名\t阶数6上表面\t阶数6下表面\t阶数6总误差\t"
-                   "阶数8上表面\t阶数8下表面\t阶数8总误差\t"
-                   "阶数10上表面\t阶数10下表面\t阶数10总误差\t"
-                   "三阶总和\n")
+with open(output_file, 'w', encoding='utf-8') as f_out:  # 关键修改
+    # 写入表头
+    f_out.write("文件名\t阶数6上表面\t阶数6下表面\t阶数6总误差\t"
+                "阶数8上表面\t阶数8下表面\t阶数8总误差\t"
+                "阶数10上表面\t阶数10下表面\t阶数10总误差\t"
+                "三阶总和\n")
+    
+    for csv_file in csv_files:
+        file_path = os.path.join(folder_path, csv_file)
+        file_results = [csv_file]  # 存储当前文件的结果
         
-        for csv_file in csv_files:
-            file_path = os.path.join(folder_path, csv_file)
-            file_results = [csv_file]  # 存储当前文件的结果
+        try:
+            sum_errors = 0  # 用于累加6,8,10阶的总误差
+            order_errors = []  # 存储各阶误差
             
-            try:
-                sum_errors = 0  # 用于累加6,8,10阶的总误差
-                order_errors = []  # 存储各阶误差
-                
-                for order in orders:
-                    err_up, err_low, total_err = CST_fitting_error(file_path, order)
-                    order_errors.extend([err_up, err_low, total_err])
-                    sum_errors += total_err
-                
-                # 将结果写入列表
-                file_results.extend([f"{x:.6f}" for x in order_errors])
-                file_results.append(f"{sum_errors:.6f}")
-                
-                # 写入文件（制表符分隔）
-                f_out.write("\t".join(file_results) + "\n")
-                
-                print(f"处理完成: {csv_file}")
-                
-            except Exception as e:
-                print(f"处理失败 {csv_file}: {str(e)}")
-                # 写入错误标记
-                f_out.write(f"{csv_file}\tERROR\t{str(e)[:50]}\n")
+            for order in orders:
+                err_up, err_low, total_err = CST_fitting_error(file_path, order)
+                order_errors.extend([err_up, err_low, total_err])
+                sum_errors += total_err
+            
+            # 将结果写入列表
+            file_results.extend([f"{x:.6f}" for x in order_errors])
+            file_results.append(f"{sum_errors:.6f}")
+            
+            # 写入文件（制表符分隔）
+            f_out.write("\t".join(file_results) + "\n")
+            
+            print(f"处理完成: {csv_file}")
+            
+        except Exception as e:
+            print(f"处理失败 {csv_file}: {str(e)}")
+            # 写入错误标记
+            f_out.write(f"{csv_file}\tERROR\t{str(e)[:50]}\n")
 
 if __name__ == "__main__":
     folder_path = r"D:\CST-LLM\processsed_airfoil_data\test"
-    process_folder(folder_path)
+    output_file="D:\\CST-LLM\\results.csv"
+    process_folder(folder_path, output_file)
